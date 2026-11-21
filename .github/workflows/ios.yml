@@ -1,0 +1,108 @@
+name: iOS IPA (unsigned)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+    paths:
+      - "client/**"
+      - "shared/**"
+      - "maps/**"
+      - "scripts/**"
+      - "assets/**"
+      - "project.godot"
+      - "export_presets.cfg.example"
+      - ".github/workflows/ios.yml"
+
+jobs:
+  build-unsigned-ipa:
+    name: Build unsigned IPA
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Install Godot 4.4.1 and export templates
+        env:
+          GODOT_VERSION: "4.4.1"
+        run: |
+          set -euo pipefail
+          BASE_URL="https://github.com/godotengine/godot/releases/download/${GODOT_VERSION}-stable"
+
+          curl -fsSL -o /tmp/godot.zip "${BASE_URL}/Godot_v${GODOT_VERSION}-stable_macos.universal.zip"
+          unzip -q /tmp/godot.zip -d /tmp/godot-bin
+          sudo mv /tmp/godot-bin/Godot.app /Applications/Godot.app
+          GODOT="/Applications/Godot.app/Contents/MacOS/Godot"
+          "${GODOT}" --version
+
+          TEMPLATES_DIR="$HOME/Library/Application Support/Godot/export_templates/${GODOT_VERSION}.stable"
+          mkdir -p "${TEMPLATES_DIR}"
+          curl -fsSL -o /tmp/templates.tpz "${BASE_URL}/Godot_v${GODOT_VERSION}-stable_export_templates.tpz"
+          unzip -q /tmp/templates.tpz -d /tmp/godot-templates
+          if [ -d /tmp/godot-templates/templates ]; then
+            mv /tmp/godot-templates/templates/* "${TEMPLATES_DIR}/"
+          else
+            mv /tmp/godot-templates/* "${TEMPLATES_DIR}/"
+          fi
+          ls -1 "${TEMPLATES_DIR}" | grep -i ios || { echo "iOS export template missing" >&2; exit 1; }
+
+      - name: Prepare Godot project
+        run: |
+          set -euo pipefail
+          cp export_presets.cfg.example export_presets.cfg
+          GODOT="/Applications/Godot.app/Contents/MacOS/Godot"
+          # Generate editor settings and import assets; failures here are non-fatal.
+          timeout 300 "${GODOT}" --headless --editor --quit --path . >/tmp/godot-editor.log 2>&1 || true
+          tail -n 20 /tmp/godot-editor.log || true
+
+      - name: Export Xcode project
+        run: |
+          set -euo pipefail
+          GODOT="/Applications/Godot.app/Contents/MacOS/Godot"
+          mkdir -p build/ios
+          "${GODOT}" --headless --path . --export-debug "iOS" build/ios/OpenBR.xcodeproj
+          ls -la build/ios
+
+      - name: Build unsigned .app with xcodebuild
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project build/ios/OpenBR.xcodeproj \
+            -target OpenBR \
+            -configuration Release \
+            -sdk iphoneos \
+            -arch arm64 \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CONFIGURATION_BUILD_DIR="$PWD/build/ios/app" \
+            build
+
+          APP_PATH="$(find build/ios/app -maxdepth 1 -name '*.app' -print -quit)"
+          if [ -z "${APP_PATH}" ]; then
+            echo "No .app produced" >&2
+            exit 1
+          fi
+          echo "Built: ${APP_PATH}"
+
+      - name: Package unsigned IPA
+        run: |
+          set -euo pipefail
+          APP_PATH="$(find build/ios/app -maxdepth 1 -name '*.app' -print -quit)"
+          rm -rf build/ios/ipa && mkdir -p build/ios/ipa/Payload
+          cp -R "${APP_PATH}" build/ios/ipa/Payload/
+          (cd build/ios/ipa && zip -qr ../OpenBR-unsigned.ipa Payload)
+          ls -lh build/ios/OpenBR-unsigned.ipa
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenBR-ios-unsigned
+          path: build/ios/OpenBR-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
