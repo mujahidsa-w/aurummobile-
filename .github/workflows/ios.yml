@@ -65,7 +65,11 @@ jobs:
           set -euo pipefail
           GODOT="/Applications/Godot.app/Contents/MacOS/Godot"
           mkdir -p build/ios
-          "${GODOT}" --headless --path . --export-debug "iOS" build/ios/OpenBR.xcodeproj
+          # Godot tries to run its own signed xcodebuild at the end of export and fails
+          # on CI without an Apple account. The Xcode project is generated before that
+          # step, so ignore the failure here and build unsigned in the next step.
+          "${GODOT}" --headless --path . --export-debug "iOS" build/ios/OpenBR.xcodeproj || true
+          test -d build/ios/OpenBR.xcodeproj
           ls -la build/ios
 
       - name: Build unsigned .app with xcodebuild
